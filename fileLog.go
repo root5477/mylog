@@ -7,13 +7,25 @@ import (
 	"time"
 )
 
+//	logMessage := fmt.Sprintf("[%s][%s][%v  %v  %v行]%s\n", now, level, fileName, funcName, lineNum, message)
+
+type logData struct {
+	time     string
+	loglevel string
+	fileName string
+	funcName string
+	lineNum  int
+	message  string
+}
+
 type FileLogger struct {
-	Level        LogLevel
-	FilePath     string
-	FileName     string
-	MaxFileSize  int64
-	FileObj      *os.File
-	ErrorFileObj *os.File
+	Level          LogLevel
+	FilePath       string
+	FileName       string
+	MaxFileSize    int64
+	FileObj        *os.File
+	ErrorFileObj   *os.File
+	logMessageChan chan *logData
 }
 
 func NewFileLogger(level, filePath, fileName string, size int64) *FileLogger {
@@ -22,10 +34,11 @@ func NewFileLogger(level, filePath, fileName string, size int64) *FileLogger {
 		panic(err)
 	}
 	fl := &FileLogger{
-		Level:       logLevel,
-		FilePath:    filePath,
-		FileName:    fileName,
-		MaxFileSize: size,
+		Level:          logLevel,
+		FilePath:       filePath,
+		FileName:       fileName,
+		MaxFileSize:    size,
+		logMessageChan: make(chan *logData, 50000),
 	}
 	err = fl.initFile()
 	if err != nil {
@@ -50,6 +63,8 @@ func (f1 *FileLogger) initFile() error {
 	//到这里说明日志文件都已经打开
 	f1.FileObj = fileObj
 	f1.ErrorFileObj = errFileObj
+	go f1.RealWriteIntoFile()
+
 	return nil
 }
 
@@ -120,20 +135,43 @@ func (file *FileLogger) logFile(lv LogLevel, formatString string, other ...inter
 		}
 		file.FileObj = newFile
 	}
-	fmt.Fprintf(file.FileObj, "[%s][%s][%v  %v  %v行]%s\n", now, level, fileName, funcName, lineNum, message)
-	//如果日志级别比Error还大，应再记录一份error日志
-	if lv >= ERROR {
-		cutTag := file.checkLogFileSize(file.ErrorFileObj)
-		if cutTag == true {
-			//需要切割
-			newFile, errCut := file.cutLogFileOnSize(file.ErrorFileObj)
-			if errCut != nil {
-				fmt.Printf("切割日志文件出错，err is:%v", errCut)
-				return
+
+	logData := &logData{
+		time:     now,
+		loglevel: level,
+		fileName: fileName,
+		funcName: funcName,
+		lineNum:  lineNum,
+		message:  message,
+	}
+	//将日志信息存入通道，异步写入文件，不影响主业务逻辑
+	select {
+	case file.logMessageChan <- logData:
+	default:
+	}
+}
+
+//真正往日志文件中写入信息
+func (fileLogger *FileLogger) RealWriteIntoFile() {
+	for data := range fileLogger.logMessageChan {
+		logMessage := fmt.Sprintf("[%s][%s][%v  %v  %v行]%s\n", data.time, data.loglevel, data.fileName, data.funcName, data.lineNum, data.message)
+		fmt.Fprintln(fileLogger.FileObj, logMessage)
+		//如果日志级别比Error还大，应再记录一份error日志
+		level, _ := levelToLogLevel(data.loglevel)
+		if level >= ERROR {
+			cutTag := fileLogger.checkLogFileSize(fileLogger.ErrorFileObj)
+			if cutTag == true {
+				//需要切割
+				newFile, errCut := fileLogger.cutLogFileOnSize(fileLogger.ErrorFileObj)
+				if errCut != nil {
+					fmt.Printf("切割日志文件出错，err is:%v", errCut)
+					return
+				}
+				fileLogger.ErrorFileObj = newFile
 			}
-			file.ErrorFileObj = newFile
+			//fmt.Fprintf(file.ErrorFileObj, "[%s][%s][%v  %v  %v行]%s\n", now, level, fileName, funcName, lineNum, message)
+			fmt.Fprintln(fileLogger.ErrorFileObj, logMessage)
 		}
-		fmt.Fprintf(file.ErrorFileObj, "[%s][%s][%v  %v  %v行]%s\n", now, level, fileName, funcName, lineNum, message)
 	}
 }
 
